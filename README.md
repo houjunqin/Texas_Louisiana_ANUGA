@@ -138,9 +138,11 @@ python download_ibtracs_texas_louisiana.py \
   --name HARVEY \
   --season 2017 \
   --mesh outputs/texas_louisiana_mesh.npz \
-  --track-start-iso 2017-08-21T18:00:00Z \
-  --track-end-iso 2017-09-02T12:00:00Z \
-  --anuga-npz outputs/harvey_track_gulf.npz
+  --anuga-npz outputs/harvey_track_gulf.npz \
+  --event-buffer-deg 2.5 \
+  --pre-impact-hours 48 \
+  --post-impact-hours 72 \
+  --output-interval-minutes 30
 ```
 The validated Harvey identification is:
 ```bash
@@ -168,24 +170,94 @@ r34_quadrant_km
 r50_quadrant_km
 r64_quadrant_km
 ```
-That time window is exactly 282 hours and therefore aligns with the compound
-forcing example below. Omit the two track-window arguments to retain Harvey's
-complete 414-hour IBTrACS lifecycle (2017-08-16 06:00 through 2017-09-02
-12:00 UTC).
+The automatic timing logic is:
 
-The default physical crop is `[-98.1, -91.9, 25.2, 30.8]` in
-west/east/south/north order. The 2.5-degree buffer is an impact-screening
-assumption, not a wind-footprint calculation. Tighten it for center-crossing
-storms or expand it when building a conservative regional event catalog.
+- Find the first and last IBTrACS records inside the buffered region:
+ ```bash
+longitude: −98.1 to −91.9
+latitude:   25.2 to 30.8
+buffer:      2.5 degrees
+```
+- Start 48 hours before the first nearby record.
+- End 72 hours after the last nearby record.
+- Clip these times to the available IBTrACS track.
+- Snap start and end to actual IBTrACS records.
+- Calculate duration_hours automatically.
 
+You can change the approach padding:
+```bash
+--pre-impact-hours 72 \
+--post-impact-hours 96
+```
+- The generated NPZ contains fixed-width Unicode `iso_time` values and therefore
+- loads safely with `allow_pickle=False`. Missing IBTrACS outer pressure, RMW, or
+- ROCI values are temporally interpolated where possible; otherwise the explicit
+- fallbacks are 1013.25 hPa, 45 km, and 300 km. Review these assumptions before
+- production surge simulations.
 
-The generated NPZ contains fixed-width Unicode `iso_time` values and therefore
-loads safely with `allow_pickle=False`. Missing IBTrACS outer pressure, RMW, or
-ROCI values are temporally interpolated where possible; otherwise the explicit
-fallbacks are 1013.25 hPa, 45 km, and 300 km. Review these assumptions before
-production surge simulations.
+Generated parameter files
 
-## 3. Create a Harvey compound forcing file: harvey_compound_forcing.npz
+The command produces:
+```bash
+outputs/harvey_track_gulf.npz
+outputs/harvey_track_gulf_event_parameters.json
+outputs/harvey_track_gulf_event_parameters.sh
+```
+The JSON contains:
+```bash
+{
+  "event": {
+    "ibtracs_sid": "2017228N14314",
+    "atcf_id": "AL092017",
+    "name": "HARVEY",
+    "season": 2017
+  },
+  "timing": {
+    "track_start_iso": "...",
+    "track_end_iso": "...",
+    "duration_hours": 0,
+    "output_interval_minutes": 30,
+    "output_time_count": 0
+  },
+  "approved_usgs_sites": [
+    "08211500",
+    "08162500",
+    "08116650",
+    "08072000",
+    "08041000",
+    "08030500"
+  ]
+}
+```
+## 3. Load the parameters into the terminal
+
+Run:
+```bash
+source outputs/harvey_track_gulf_event_parameters.sh
+```
+Inspect them:
+```bash
+echo "$TRACK_START_ISO"
+echo "$TRACK_END_ISO"
+echo "$DURATION_HOURS"
+echo "$OUTPUT_INTERVAL_MINUTES"
+echo "$APPROVED_USGS_SITES"
+echo "$TRACK_NPZ"
+```
+Available variables include:
+```bash
+IBTRACS_SID
+ATCF_ID
+STORM_NAME
+SEASON
+TRACK_START_ISO
+TRACK_END_ISO
+DURATION_HOURS
+OUTPUT_INTERVAL_MINUTES
+APPROVED_USGS_SITES
+TRACK_NPZ
+```
+## 4. Create a Harvey compound forcing file: harvey_compound_forcing.npz
 ### Download compound-flood observations
 
 - NOAA/NWS Stage IV hourly multisensor precipitation;
@@ -195,61 +267,53 @@ production surge simulations.
 - optional ADCIRC/SWAN-style wave-force fields;
 - corrected atmospheric-pressure units and pressure-gradient sign.
 
-NOAA's historical `ncep_stage_iv_source_files_YYYYMMDD.tar` products are
-published as daily source archives. The reader now discovers GRIB/GRIB2 files
-by content/name, supports `.gz`, and reads each message's accumulation period.
-Check `source_accumulation_hours_min/max` in the audit file. If both equal 24,
-the forcing is daily mean rainfall and true hourly Stage IV/MRMS data should be
-obtained before a final Harvey calibration.
+NOAA's historical `ncep_stage_iv_source_files_YYYYMMDD.tar` products are published as daily source archives. The reader now discovers GRIB/GRIB2 files by content/name, supports `.gz`, and reads each message's accumulation period.
+Check `source_accumulation_hours_min/max` in the audit file. If both equal 24, the forcing is daily mean rainfall and true hourly Stage IV/MRMS data should be obtained before a final Harvey calibration.
 
-It does **not** automatically burn levees, roads, bridges, or culverts into an
-already-created mesh. Those structures alter topology/elevation and require a
-mesh rebuild and engineering review.
-The recommended event window uses the complete filtered Harvey track rather
-than stopping after 282 hours:
+It does **not** automatically burn levees, roads, bridges, or culverts into an already-created mesh. Those structures alter topology/elevation and require a mesh rebuild and engineering review.
+
+Download additional data using derived dates:
 
 ```bash
+
 python download_harvey_additional_data.py \
   --mesh outputs/texas_louisiana_mesh.npz \
   --output-dir outputs/harvey_additional_raw \
-  --start 2017-08-21T18:00:00Z \
-  --end 2017-09-03T00:00:00Z \
-  --usgs-sites 08211500,08162500,08116650,08072000,08041000,08030500
+  --start "$TRACK_START_ISO" \
+  --end "$TRACK_END_ISO" \
+  --usgs-sites "$APPROVED_USGS_SITES"
 ```
 
-The site list is only a starting candidate list. Verify every station and
-avoid using two stations that represent the same river inflow. If
-`--usgs-sites` is omitted, the downloader retrieves all stream gauges in the
-mesh bounding box; the preparation step can then select a reviewed subset.
+The site list is only a starting candidate list. Verify every station and avoid using two stations that represent the same river inflow. If `--usgs-sites` is omitted, the downloader retrieves all stream gauges in the mesh bounding box; the preparation step can then select a reviewed subset.
 
 
 ### Prepare mesh-aligned forcing
-conda install -c conda-forge pygrib eccodes
+
+Install pygrib:
 ```bash
+conda install -c conda-forge pygrib eccodes
+```
+```bash
+Prepare compound forcing
 python prepare_harvey_forcing.py \
   --mesh outputs/texas_louisiana_mesh.npz \
-  --track outputs/harvey_track_gulf.npz \
+  --track "$TRACK_NPZ" \
   --download-dir outputs/harvey_additional_raw \
   --output outputs/harvey_compound_forcing.npz \
-  --duration-hours 282 \
-  --interval-minutes 30 \
-  --start-iso 2017-08-21T18:00:00Z \
-  --approved-usgs-sites 08211500,08162500,08116650,08072000,08041000,08030500 \
+  --start-iso "$TRACK_START_ISO" \
+  --duration-hours "$DURATION_HOURS" \
+  --interval-minutes "$OUTPUT_INTERVAL_MINUTES" \
+  --approved-usgs-sites "$APPROVED_USGS_SITES" \
   --inlet-triangles 16
 ```
 
-The preparation program writes an adjacent `*.audit.json`. Inspect its
-gage-to-boundary mapping before a production simulation. Automatic nearest-edge
-mapping is a reproducible initial guess, not a hydrologic guarantee.
+- The preparation program writes an adjacent `*.audit.json`. Inspect its gage-to-boundary mapping before a production simulation. Automatic nearest-edge mapping is a reproducible initial guess, not a hydrologic guarantee.
 
-`--start-iso` is optional. It is useful for legacy `harvey_track_gulf.npz`
-files whose `iso_time` array was saved with object dtype. The revised loader
-can read those trusted legacy files automatically, while new files should use
-fixed-width Unicode timestamps.
+- `--start-iso` is optional. It is useful for legacy `harvey_track_gulf.npz` files whose `iso_time` array was saved with object dtype. The revised loader can read those trusted legacy files automatically, while new files should use fixed-width Unicode timestamps.
 
-At 741,254 nodes, 282 hours at a 5-minute interval produces 3,385 time levels.
-Each dense float32 `[T,N]` field is about 9.35 GiB, so the preparation program
-prints an explicit memory warning. A 30-minute interval is strongly preferred
+- At 741,254 nodes, 282 hours at a 5-minute interval produces 3,385 time levels.
+- Each dense float32 `[T,N]` field is about 9.35 GiB, so the preparation program prints an explicit memory warning. 
+- A 30-minute interval is strongly preferred
 for initial testing and surrogate training.
 
 Optional spatial soil and land-cover files use these conventions:
@@ -282,7 +346,7 @@ R_{eff}=f_{imp}R+(1-f_{imp})\max(R-K_s,0).
 This is appropriate for a first compound-flood experiment, but it is not a
 calibrated Green-Ampt or watershed model.
 
-## 4. Create a tide-only forcing file: harvey_fes2022b_boundary.npz
+## 5. Create a tide-only forcing file: harvey_fes2022b_boundary.npz
 ### FES2022b ocean-tide boundary
 
 Use the FES2022b **ocean-tide elevation** files for the hydrodynamic boundary.
@@ -295,22 +359,19 @@ Install the official predictor in the ANUGA environment:
 conda install -c conda-forge pyfes
 ```
 
-Generate tides only at the unique nodes in `open_boundary_edges`. The Harvey
-track begins at `2017-08-21T18:00:00Z`, and all prediction times are UTC:
+Generate tides only at the unique nodes in `open_boundary_edges`. The Harvey track begins at `2017-08-21T18:00:00Z`, and all prediction times are UTC:
 
 ```bash
 python fes2022_boundary.py \
   --mesh outputs/texas_louisiana_mesh.npz \
-  --fes-dir /path/to/fes2022b/ocean_tide_extrapolated \
-  --track outputs/harvey_track_gulf.npz \
-  --duration-hours 282 \
-  --interval-minutes 30 \
-  --atlas-units cm \
-  --datum-offset-m 0.0 \
+  --track "$TRACK_NPZ" \
+  --fes-dir /path/to/FES2022b/ocean_tide \
+  --duration-hours "$DURATION_HOURS" \
+  --interval-minutes "$OUTPUT_INTERVAL_MINUTES" \
   --output outputs/harvey_fes2022b_boundary.npz
 ```
 
-## 5. Create a Harvey ANUGA dataset: harvey_anuga_dataset.npz
+## 6. Create a Harvey ANUGA dataset: harvey_anuga_dataset.npz
 
 ### Environment
 
@@ -406,17 +467,17 @@ regional campaign but is not a lightweight screening mesh. Use MPI/OpenMP or
 make a separately validated coarsened mesh before generating a large ensemble.
 
 ### Generate the ANUGA/HOPNet dataset
-
+Run ANUGA with matching times
 ```bash
 python build_anuga_dataset.py \
   --mesh outputs/texas_louisiana_mesh.npz \
-  --track outputs/harvey_track_gulf.npz \
+  --track "$TRACK_NPZ" \
   --tide-npz outputs/harvey_fes2022b_boundary.npz \
   --additional-forcing-npz outputs/harvey_compound_forcing.npz \
   --output outputs/harvey_compound_dataset.npz \
   --scenario-id harvey_compound \
-  --duration-hours 282 \
-  --output-minutes 30 \
+  --duration-hours "$DURATION_HOURS" \
+  --output-minutes "$OUTPUT_INTERVAL_MINUTES" \
   --open-boundary-segments 64 \
   --omp-threads 8 \
   --forcing-chunk-times 8 \
@@ -424,8 +485,7 @@ python build_anuga_dataset.py \
 ```
 
 For a smoke test, create a separate 1-hour additional-forcing file with
-`--duration-hours 1`, then run the builder with the same duration. All forcing
-files must use exactly the same `time_s` grid.
+`--duration-hours 1`, then run the builder with the same duration. All forcing files must use exactly the same `time_s` grid.
 
 ## Output conventions
 
@@ -446,157 +506,19 @@ time_iso[T]
 
 ## Wave forcing
 
-Nearshore `Sxx`, `Sxy`, and `Syy` cannot be downloaded uniquely from buoy
-`Hs/Tp/direction`. Run SWAN and compute/store the ADCIRC-style force:
+Nearshore `Sxx`, `Sxy`, and `Syy` cannot be downloaded uniquely from buoy `Hs/Tp/direction`. Run SWAN and compute/store the ADCIRC-style force:
 
 \[
 RSX=-\rho_w^{-1}(\partial_xS_{xx}+\partial_yS_{xy}),\qquad
 RSY=-\rho_w^{-1}(\partial_xS_{xy}+\partial_yS_{yy}).
 \]
 
-If the additional NPZ contains `wave_force_x_m2s2 [T,N]` and
-`wave_force_y_m2s2 [T,N]`, the patched ANUGA bridge applies them to the two
-momentum equations.
+If the additional NPZ contains `wave_force_x_m2s2 [T,N]` and `wave_force_y_m2s2 [T,N]`, the patched ANUGA bridge applies them to the two momentum equations.
 
 ## Important limitations
 
-- The regional mesh currently identifies artificial northern wet boundaries as
-  possible river boundaries. Review them against NHDPlus flowlines.
-- A gauge may be upstream of storage, branching, or tidal backwater. Its
-  measured discharge is not automatically the correct coastal boundary flux.
+- The regional mesh currently identifies artificial northern wet boundaries as  possible river boundaries. Review them against NHDPlus flowlines.
+- A gauge may be upstream of storage, branching, or tidal backwater. Its measured discharge is not automatically the correct coastal boundary flux.
 - NLD GeoJSON is downloaded but not automatically inserted into the mesh.
 - The simple loss model does not represent soil-moisture evolution.
-- A full Harvey inland-flood simulation is much more expensive than a
-  wind-and-tide-only run. Validate first on a smaller spatial crop or shorter
-  interval.
-
-1. Download Harvey and derive parameters
-
-You no longer need to enter --track-start-iso, --track-end-iso, or --duration-hours manually:
-
-python download_ibtracs_texas_louisiana.py \
-  --output-dir outputs/ibtracs_texas_louisiana \
-  --name HARVEY \
-  --season 2017 \
-  --mesh outputs/texas_louisiana_mesh.npz \
-  --anuga-npz outputs/harvey_track_gulf.npz \
-  --event-buffer-deg 2.5 \
-  --pre-impact-hours 48 \
-  --post-impact-hours 72 \
-  --output-interval-minutes 30
-
-The automatic timing logic is:
-
-Find the first and last IBTrACS records inside the buffered region:
-longitude: −98.1 to −91.9
-latitude:   25.2 to 30.8
-buffer:      2.5 degrees
-Start 48 hours before the first nearby record.
-End 72 hours after the last nearby record.
-Clip these times to the available IBTrACS track.
-Snap start and end to actual IBTrACS records.
-Calculate duration_hours automatically.
-
-You can change the approach padding:
-
---pre-impact-hours 72 \
---post-impact-hours 96
-2. Generated parameter files
-
-The command produces:
-
-outputs/harvey_track_gulf.npz
-outputs/harvey_track_gulf_event_parameters.json
-outputs/harvey_track_gulf_event_parameters.sh
-
-The JSON contains:
-
-{
-  "event": {
-    "ibtracs_sid": "2017228N14314",
-    "atcf_id": "AL092017",
-    "name": "HARVEY",
-    "season": 2017
-  },
-  "timing": {
-    "track_start_iso": "...",
-    "track_end_iso": "...",
-    "duration_hours": 0,
-    "output_interval_minutes": 30,
-    "output_time_count": 0
-  },
-  "approved_usgs_sites": [
-    "08211500",
-    "08162500",
-    "08116650",
-    "08072000",
-    "08041000",
-    "08030500"
-  ]
-}
-3. Load the parameters into the terminal
-source outputs/harvey_track_gulf_event_parameters.sh
-
-Inspect them:
-
-echo "$TRACK_START_ISO"
-echo "$TRACK_END_ISO"
-echo "$DURATION_HOURS"
-echo "$OUTPUT_INTERVAL_MINUTES"
-echo "$APPROVED_USGS_SITES"
-echo "$TRACK_NPZ"
-
-Available variables include:
-
-IBTRACS_SID
-ATCF_ID
-STORM_NAME
-SEASON
-TRACK_START_ISO
-TRACK_END_ISO
-DURATION_HOURS
-OUTPUT_INTERVAL_MINUTES
-APPROVED_USGS_SITES
-TRACK_NPZ
-4. Download additional data using derived dates
-python download_harvey_additional_data.py \
-  --mesh outputs/texas_louisiana_mesh.npz \
-  --output-dir outputs/harvey_additional_raw \
-  --start "$TRACK_START_ISO" \
-  --end "$TRACK_END_ISO" \
-  --usgs-sites "$APPROVED_USGS_SITES"
-5. Prepare compound forcing
-python prepare_harvey_forcing.py \
-  --mesh outputs/texas_louisiana_mesh.npz \
-  --track "$TRACK_NPZ" \
-  --download-dir outputs/harvey_additional_raw \
-  --output outputs/harvey_compound_forcing.npz \
-  --start-iso "$TRACK_START_ISO" \
-  --duration-hours "$DURATION_HOURS" \
-  --interval-minutes "$OUTPUT_INTERVAL_MINUTES" \
-  --approved-usgs-sites "$APPROVED_USGS_SITES" \
-  --inlet-triangles 16
-6. Generate matching FES tide forcing
-python fes2022_boundary.py \
-  --mesh outputs/texas_louisiana_mesh.npz \
-  --track "$TRACK_NPZ" \
-  --fes-dir /path/to/FES2022b/ocean_tide \
-  --duration-hours "$DURATION_HOURS" \
-  --interval-minutes "$OUTPUT_INTERVAL_MINUTES" \
-  --output outputs/harvey_fes2022b_boundary.npz
-7. Run ANUGA with matching times
-python build_anuga_dataset.py \
-  --mesh outputs/texas_louisiana_mesh.npz \
-  --track "$TRACK_NPZ" \
-  --tide-npz outputs/harvey_fes2022b_boundary.npz \
-  --additional-forcing-npz outputs/harvey_compound_forcing.npz \
-  --output outputs/harvey_compound_dataset.npz \
-  --scenario-id harvey_compound \
-  --duration-hours "$DURATION_HOURS" \
-  --output-minutes "$OUTPUT_INTERVAL_MINUTES" \
-  --open-boundary-segments 64 \
-  --omp-threads 8 \
-  --forcing-chunk-times 8 \
-  --uncompressed-output
-
-This ensures the track, rainfall, river, tide, and ANUGA output all use exactly the same start, duration, and interval.
+- A full Harvey inland-flood simulation is much more expensive than a  wind-and-tide-only run. Validate first on a smaller spatial crop or shorter interval.
